@@ -49,7 +49,7 @@ The suite spawns only its own short-lived `sleep` processes — the kill chain i
 
 ## Changelog
 
-### Unreleased
+### v5.0.3
 
 - **Fix (critical): no longer kills the whole desktop session.** The kill chain signalled the target's entire *process group* (`kill -- -PGID`). On Cinnamon/GNOME every GUI app shares the session leader's process group (e.g. `cinnamon-session`), so terminating any listed app SIGTERM'd all ~45 session processes and logged the user out. The chain now signals the process **subtree** (the PID and its descendant helpers/renderers) instead — a Chrome window kills Chrome and its renderers, not the session. A second guard refuses outright to terminate a session leader (`pid == sid`). The confirm prompt now names the app and its process-tree size rather than a process-group id.
 - **PID-less windows are now listed** — windows whose app sets no `_NET_WM_PID` (old Xt toolkits such as `xmessage`, some Wine windows) were silently invisible. They now appear as muted close-only rows (`?` in the PID column, `no PID hint` in WCHAN) and can be closed via a WM close request by window id; analysis and signal escalation stay unavailable (there is no PID to act on), and the TUI says so.
