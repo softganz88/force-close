@@ -1,0 +1,71 @@
+name: Bug report
+description: Report incorrect behavior in force-close
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. force-close sends signals to live processes, so
+        process relationships are usually the key detail — please include the
+        `ps` output below if a kill behaved wrong.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: |
+        I selected the "Notes" window and confirmed. I expected only Notes to
+        close, but <describe what actually happened>.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact steps. Include the command you ran and the input you typed.
+      placeholder: |
+        1. ./force-close.sh
+        2. Typed "3" and Enter
+        3. Typed "y" at the confirm prompt
+    validations:
+      required: true
+  - type: textarea
+    id: ps-output
+    attributes:
+      label: Process relationships (for kill-related bugs)
+      description: >
+        If a kill targeted the wrong thing, paste the output of
+        `ps -o pid,ppid,pgid,sid,comm` for the target PID and its relatives.
+        This is almost always the key detail.
+      render: text
+  - type: input
+    id: distro
+    attributes:
+      label: Distro and desktop environment
+      placeholder: "Linux Mint 22.1, Cinnamon (X11)"
+    validations:
+      required: true
+  - type: input
+    id: bash-version
+    attributes:
+      label: bash --version (first line)
+      placeholder: "GNU bash, version 5.2.21(1)-release"
+    validations:
+      required: true
+  - type: input
+    id: fc-version
+    attributes:
+      label: force-close version
+      description: The `# Version:` line at the top of force-close.sh, or the release tag.
+      placeholder: "5.0.4"
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I'm running under an X11 (or XWayland) session, not native Wayland.
+          required: true
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true

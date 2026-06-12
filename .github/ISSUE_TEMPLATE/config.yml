@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Read the contributing guide first
+    url: https://github.com/softganz88/force-close/blob/main/.github/CONTRIBUTING.md
+    about: Setup, the verification gate, and the kill-path safety rules before you file.
