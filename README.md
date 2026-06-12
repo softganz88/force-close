@@ -35,7 +35,23 @@ Linux + X11 (or XWayland). Depends on: `wmctrl`, `ps`, `lsof`, `pgrep`, `tput`, 
 - Treats zombies as un-killable and reports that their parent must reap them, rather than looping on a kill that can never succeed.
 - Sanitizes attacker-influenced window titles before printing.
 
+## Tests
+
+The pure helpers (`to10`, `trunc_str`, `escape_pattern`, `get_starttime`, `is_self_tree`) and the EXIT-trap exit-code contract are covered by a [bats](https://github.com/bats-core/bats-core) suite:
+
+```bash
+bats tests/
+```
+
+The suite spawns only its own short-lived `sleep` processes — the kill chain itself is never exercised automatically.
+
 ## Changelog
+
+### Unreleased
+
+- **Fix: CLI exit codes** — in CLI mode every exit collapsed to `1` (a nonzero return from the `restore_term` EXIT trap overrode the real status under `set -e`), breaking the documented `0`/`2`/`130` codes. The trap is now infallible and only restores cursor/screen when the TUI actually started, which also keeps piped CLI output free of stray escape sequences.
+- **Fix: identity anchor vs newline-in-comm** — a process with a newline in its comm (writable via `/proc/self/comm`) made `/proc/<pid>/stat` multi-line; the line-based read returned an empty start time, so the tool reported such processes as "already gone" and `kill_gate` skipped identity re-validation. `get_starttime` now reads the whole stat file.
+- **Tests** — bats suite for the pure helpers (`tests/force-close.bats`, 24 cases); the inline pattern escaping was extracted into `escape_pattern()` to make it testable.
 
 ### v5.0.1
 

@@ -53,15 +53,25 @@ clear_screen() { tput clear 2>/dev/null || printf '\033[2J\033[H'; }
 # Capability-gated: if the terminal lacks smcup/rmcup these are no-ops, so a
 # dumb/unset TERM degrades cleanly instead of emitting stray escapes.
 ALT_ACTIVE=0
+TUI_ACTIVE=0
 enter_tui() {
     [[ -t 1 ]] || return 0
+    TUI_ACTIVE=1
     tput smcup 2>/dev/null && ALT_ACTIVE=1 || true
     tput civis 2>/dev/null || true   # hide cursor while drawing
 }
 restore_term() {
-    tput cnorm 2>/dev/null || true   # cursor back on
-    printf '%s' "${NC:-}"            # drop any pending color
-    (( ALT_ACTIVE )) && { tput rmcup 2>/dev/null || true; }
+    # Never let this trap fail: under set -e a failing EXIT trap OVERRIDES the
+    # script's exit status (exit 0/2/130 all became 1 in CLI mode, where
+    # ALT_ACTIVE=0 made the old `(( ALT_ACTIVE )) && …` tail return nonzero).
+    # Cursor/screen restoration is also gated on the TUI having started, so
+    # CLI mode emits no stray escapes into pipeable output.
+    if (( TUI_ACTIVE )); then
+        tput cnorm 2>/dev/null || true   # cursor back on (hidden in enter_tui)
+        (( ALT_ACTIVE )) && { tput rmcup 2>/dev/null || true; }
+    fi
+    printf '%s' "${NC:-}"            # drop any pending color (empty when not a tty)
+    return 0
 }
 trap restore_term EXIT
 trap 'exit 130' INT
@@ -137,11 +147,16 @@ to10 CPU_IDLE10 "1.0"
 # Sets STARTTIME ("" if the process is gone). Fork-free (read builtin).
 get_starttime() {
     STARTTIME=""
-    local s
+    local s=""
+    # Whole-file read (-d ''), not line-based: comm may contain a NEWLINE
+    # (any process can write one into /proc/self/comm), which makes stat a
+    # multi-line file — a line-based read parses garbage and returns "",
+    # blinding the identity anchor. read exits nonzero at EOF but fills s.
     # 2>/dev/null must precede the input redirect, else a failed open on a
     # gone process leaks "No such file" before stderr is suppressed.
-    read -r s 2>/dev/null < "/proc/$1/stat" || return 0
-    s="${s##*) }"                # strip "pid (comm) " — comm may contain spaces
+    read -r -d '' s 2>/dev/null < "/proc/$1/stat" || true
+    [[ -n "$s" ]] || return 0
+    s="${s##*) }"                # strip "pid (comm) " — comm may contain spaces/newlines
     local -a f
     read -r -a f <<< "$s"        # starttime = 20th field after state
     STARTTIME="${f[19]:-}"
@@ -208,6 +223,11 @@ repeat_char() {
     local char="$1" count="$2" str=""
     printf -v str "%${count}s" ""
     printf '%s' "${str// /$char}"
+}
+
+# ERE-escape a literal string for pgrep -f (escapes [ ] \ . ^ $ * + ? ( ) { } |).
+escape_pattern() { # $1=literal string → escaped pattern on stdout
+    printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'
 }
 
 # --- Table geometry — single source of truth ---
@@ -421,13 +441,18 @@ terminate_group() {
     return 0
 }
 
+# --- Test hook ---
+# When sourced (tests/force-close.bats), stop here: helpers and environment
+# checks above are loaded, but no UI or kill path runs.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
+
 # --- Main Interaction ---
 
 if [[ -n "${1:-}" ]]; then
     # Escape the whole pattern. Self-matches (our own cmdline contains $1) are
     # removed by the identity filter below — no [f]irst-char trick needed (it
     # produced broken patterns for metachar-leading arguments).
-    PATTERN=$(printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
+    PATTERN=$(escape_pattern "$1")
     mapfile -t PIDS < <(pgrep -f "$PATTERN" 2>/dev/null || true)
     FILTERED=()
     for pid in "${PIDS[@]}"; do
