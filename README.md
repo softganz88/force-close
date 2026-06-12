@@ -2,6 +2,10 @@
 
 Advanced X11 process recovery and deep-analysis tool — an interactive TUI for inspecting and force-terminating stuck windows/processes, plus a non-interactive CLI mode for killing by name pattern.
 
+![force-close TUI demo](docs/tui-demo.gif)
+
+*Listing windows, selecting one, confirming, and watching the kill chain close it (the target here is a throwaway window spawned just for the demo).*
+
 ## Requirements
 
 Linux + X11 (or XWayland). Depends on: `wmctrl`, `ps`, `lsof`, `pgrep`, `tput`, `awk`, `sed`, `sort`, `xargs`, `head` (all checked at startup).
