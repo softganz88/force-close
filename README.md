@@ -6,6 +6,8 @@ Advanced X11 process recovery and deep-analysis tool — an interactive TUI for 
 
 Linux + X11 (or XWayland). Depends on: `wmctrl`, `ps`, `lsof`, `pgrep`, `tput`, `awk`, `sed`, `sort`, `xargs`, `head` (all checked at startup).
 
+> **X11-only:** native Wayland windows are invisible to `wmctrl` and will not appear. Run under an X11 session (or XWayland for X11 clients).
+
 ## Usage
 
 ```bash
@@ -32,3 +34,14 @@ Linux + X11 (or XWayland). Depends on: `wmctrl`, `ps`, `lsof`, `pgrep`, `tput`, 
 - Refuses to signal its own process group.
 - Treats zombies as un-killable and reports that their parent must reap them, rather than looping on a kill that can never succeed.
 - Sanitizes attacker-influenced window titles before printing.
+
+## Changelog
+
+### v5.0.1
+
+- **Terminal hygiene** — a `trap` restores the terminal on any exit (including `Ctrl-C`, `SIGTERM`, or an unexpected abort): leaves the alternate screen, restores the cursor, and clears pending color. The interactive TUI now runs on the alternate screen so it no longer clobbers scrollback; CLI mode stays linear and pipeable.
+- **Selection-id normalization** — leading-zero and spaced inputs such as `a 03` and `a  3` now resolve correctly, with strict digit validation so malformed input can't abort the script.
+
+### v5.0.0
+
+- Initial reviewed release: identity-anchored kill chain (defeats PID reuse), group-aware liveness, self-tree exclusion, zombie handling, sanitized rendering, single-source table geometry, and a fork-free batched refresh. `shellcheck`-clean.
