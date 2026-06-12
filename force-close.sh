@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # force-close.sh: Advanced Process Recovery & Deep Analysis Tool
-# Version: 5.0.0
+# Version: 5.0.1
 # Repo: github.com/softganz88/force-close
 #
 # Exit codes (CLI mode):
@@ -45,6 +45,27 @@ readonly H="─" V="│" TL="┌" BL="└" TJ="┬" BJ="┴"
 
 # tput clear fails (rc 2) when TERM is unset; fall back to the ANSI sequence
 clear_screen() { tput clear 2>/dev/null || printf '\033[2J\033[H'; }
+
+# --- Terminal hygiene ---
+# Use the alternate screen so the tool doesn't clobber scrollback, and always
+# restore a sane terminal (visible cursor, reset attributes, leave alt-screen)
+# on ANY exit — including Ctrl-C, SIGTERM, or an unexpected set -e abort.
+# Capability-gated: if the terminal lacks smcup/rmcup these are no-ops, so a
+# dumb/unset TERM degrades cleanly instead of emitting stray escapes.
+ALT_ACTIVE=0
+enter_tui() {
+    [[ -t 1 ]] || return 0
+    tput smcup 2>/dev/null && ALT_ACTIVE=1 || true
+    tput civis 2>/dev/null || true   # hide cursor while drawing
+}
+restore_term() {
+    tput cnorm 2>/dev/null || true   # cursor back on
+    printf '%s' "${NC:-}"            # drop any pending color
+    (( ALT_ACTIVE )) && { tput rmcup 2>/dev/null || true; }
+}
+trap restore_term EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- Check Dependencies ---
 check_deps() {
@@ -436,6 +457,8 @@ fi
 declare -A MAP_PID MAP_NAME MAP_START
 declare -A PS_CPU PS_MEM PS_STATE PS_PGID PS_SID
 
+enter_tui   # alt-screen for the interactive loop only (CLI mode stays linear)
+
 while true; do
     header
     table_header
@@ -508,16 +531,26 @@ while true; do
         q) exit 0 ;;
         r) continue ;;
         a\ *)
-            ID=${CHOICE#a }
-            if [[ -n "${MAP_PID[$ID]+x}" ]]; then
-                deep_analyze "${MAP_PID[$ID]}" "${MAP_NAME[$ID]}"
+            ID=${CHOICE#a }; ID=${ID// /}    # drop any spaces (e.g. "a  3")
+            if [[ "$ID" =~ ^[0-9]+$ ]]; then
+                ID=$(( 10#$ID ))             # normalize leading zeros to match keys
+                if [[ -n "${MAP_PID[$ID]+x}" ]]; then
+                    deep_analyze "${MAP_PID[$ID]}" "${MAP_NAME[$ID]}"
+                else
+                    echo "Invalid ID: $ID" ; sleep 1
+                fi
             else
-                echo "Invalid ID: $ID" ; sleep 1
+                echo "Invalid ID: ${ID:-(none)}" ; sleep 1
             fi
             ;;
         [0-9]*)
-            if [[ -n "${MAP_PID[$CHOICE]+x}" ]]; then
-                terminate_group "${MAP_PID[$CHOICE]}" "${MAP_NAME[$CHOICE]}" "${MAP_START[$CHOICE]}"
+            if [[ "$CHOICE" =~ ^[0-9]+$ ]]; then
+                ID=$(( 10#$CHOICE ))         # normalize leading zeros to match keys
+                if [[ -n "${MAP_PID[$ID]+x}" ]]; then
+                    terminate_group "${MAP_PID[$ID]}" "${MAP_NAME[$ID]}" "${MAP_START[$ID]}"
+                else
+                    echo "Invalid ID: $ID" ; sleep 1
+                fi
             else
                 echo "Invalid ID: $CHOICE" ; sleep 1
             fi
