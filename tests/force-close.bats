@@ -220,6 +220,16 @@ assert_anchor_stable_across_comm_rename() { # $1=comm writer command
     [ "$output" = "1" ]
 }
 
+@test "collect_subtree: gone PID yields empty (drives terminate_group's nproc==0 already-gone guard)" {
+    # A never-allocated PID: collect_subtree must return an empty SUBTREE, which
+    # is what terminate_group keys on to print "already gone" instead of falsely
+    # reporting TERMINATED after signalling nothing.
+    pid_max=$(cat /proc/sys/kernel/pid_max)
+    run fc "collect_subtree $pid_max; printf '%s' \"\${#SUBTREE[@]}\""
+    [ "$status" -eq 0 ]
+    [ "$output" = "0" ]
+}
+
 @test "collect_subtree: excludes our own process tree" {
     # The sourcing shell itself must never appear in a subtree rooted at it.
     run fc 'collect_subtree $$; printf "%s" "${#SUBTREE[@]}"'

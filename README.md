@@ -49,6 +49,12 @@ The suite spawns only its own short-lived `sleep` processes — the kill chain i
 
 ## Changelog
 
+### Unreleased
+
+- **Fix: no false "already terminated".** If a target exited in the brief window between the identity check and the kill chain, the confirm prompt read "0 processes" and a `y` reported success having signalled nothing; `terminate_group` now detects the empty subtree and reports "already gone". `collect_subtree` no longer counts a PID that has no `/proc` entry.
+- **Fix: no spurious "FAILED" from PID reuse.** After the final `SIGKILL`, the survivor check now re-anchors on the root's start time first — a PID recycled by an unrelated process during the settle window is no longer mistaken for a surviving process tree and reported FAILED (exit 2).
+- **Note:** documented that subtree termination reaches descendants only — a helper that detached via `setsid()` (e.g. a browser GPU process) is not signalled but self-exits when its IPC to the killed root breaks; the window is always in the root's subtree, so it still closes.
+
 ### v5.0.3
 
 - **Fix (critical): no longer kills the whole desktop session.** The kill chain signalled the target's entire *process group* (`kill -- -PGID`). On Cinnamon/GNOME every GUI app shares the session leader's process group (e.g. `cinnamon-session`), so terminating any listed app SIGTERM'd all ~45 session processes and logged the user out. The chain now signals the process **subtree** (the PID and its descendant helpers/renderers) instead — a Chrome window kills Chrome and its renderers, not the session. A second guard refuses outright to terminate a session leader (`pid == sid`). The confirm prompt now names the app and its process-tree size rather than a process-group id.

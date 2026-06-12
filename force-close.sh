@@ -187,6 +187,10 @@ collect_subtree() { # $1=root pid → fills global array SUBTREE
     local cur kid
     while (( ${#queue[@]} > 0 )); do
         cur="${queue[0]}"; queue=("${queue[@]:1}")
+        # Skip PIDs that no longer exist, so a dead root (or a child that exited
+        # mid-walk) isn't counted — keeps nproc truthful and lets the empty-tree
+        # guards fire. pgrep -P on a gone PID already yields no children.
+        [[ -d "/proc/$cur" ]] || continue
         # Never include our own tree (the terminal/script): a descendant scan
         # can't reach us, but a recycled PID could — cheap guard, hard safety.
         is_self_tree "$cur" && continue
@@ -220,6 +224,12 @@ wait_subtree_exit() { # root seconds → 0 once the subtree has no live members
 
 # Send a signal to every member of the subtree (leaves first via reverse order,
 # so parents can't re-fork children we already signalled). Skips our own tree.
+# Scope note: this reaches descendants only (parent→child links). A helper that
+# detached via setsid()/setpgid() (e.g. a browser GPU/zygote process) is no
+# longer a descendant and is NOT signalled — the old group kill caught those but
+# also took down the shared session group (the bug this replaced). Such a helper
+# loses its IPC channel to the killed root and self-exits shortly after; the
+# window itself is always owned by the root's subtree, so it still closes.
 signal_subtree() { # $1=signal $2=root pid
     collect_subtree "$2"
     local i
@@ -424,6 +434,13 @@ terminate_group() {
     # radius before confirming (1 = just this process; >1 = it has children).
     collect_subtree "$pid"
     local nproc=${#SUBTREE[@]}
+    # If the root exited between the identity check above and here, the subtree
+    # is empty — there is nothing to signal. Without this guard the prompt would
+    # read "0 processes" and a 'y' would report TERMINATED having killed nothing.
+    if (( nproc == 0 )); then
+        echo -e " ${RED}Process $pid is already gone.${NC}"
+        sleep 1 ; return 0
+    fi
     printf '\n %sCONFIRM%s Terminate %s%s%s (PID %s, %s process%s)? [y/N]: ' \
            "${RED}${BOLD}" "$NC" "$BOLD" "$name" "$NC" "$pid" "$nproc" "$([[ $nproc -ne 1 ]] && echo es)"
     local CONFIRM
@@ -476,7 +493,13 @@ terminate_group() {
     echo -ne "  ${GRAY}3/3${NC} SIGKILL (forced)     "
     signal_subtree 9 "$pid"
     sleep 1
-    if ! subtree_alive "$pid"; then
+    # Re-anchor before the survivor check: if the root PID is gone or was reused
+    # during the sleep, the original target is dead — a recycled PID owned by a
+    # new process must not be read as a surviving "tree" and reported FAILED.
+    get_starttime "$pid"
+    if [[ -z "$STARTTIME" || "$STARTTIME" != "$anchor_start" ]]; then
+        echo -e "${GREEN}${BOLD} TERMINATED${NC}"
+    elif ! subtree_alive "$pid"; then
         echo -e "${GREEN}${BOLD} TERMINATED${NC}"
     else
         echo -e "${RED}${BOLD} FAILED${NC} ${GRAY}(survivors in tree — try with sudo)${NC}"
