@@ -47,7 +47,7 @@ The suite spawns only its own short-lived `sleep` processes — the kill chain i
 
 ## Changelog
 
-### Unreleased
+### v5.0.2
 
 - **Fix: CLI exit codes** — in CLI mode every exit collapsed to `1` (a nonzero return from the `restore_term` EXIT trap overrode the real status under `set -e`), breaking the documented `0`/`2`/`130` codes. The trap is now infallible and only restores cursor/screen when the TUI actually started, which also keeps piped CLI output free of stray escape sequences.
 - **Fix: identity anchor vs newline-in-comm** — a process with a newline in its comm (writable via `/proc/self/comm`) made `/proc/<pid>/stat` multi-line; the line-based read returned an empty start time, so the tool reported such processes as "already gone" and `kill_gate` skipped identity re-validation. `get_starttime` now reads the whole stat file.
