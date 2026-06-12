@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # force-close.sh: Advanced Process Recovery & Deep Analysis Tool
-# Version: 5.0.3
+# Version: 5.0.4
 # Repo: github.com/softganz88/force-close
 #
 # Exit codes (CLI mode):

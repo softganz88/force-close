@@ -49,7 +49,7 @@ The suite spawns only its own short-lived `sleep` processes — the kill chain i
 
 ## Changelog
 
-### Unreleased
+### v5.0.4
 
 - **Fix: no false "already terminated".** If a target exited in the brief window between the identity check and the kill chain, the confirm prompt read "0 processes" and a `y` reported success having signalled nothing; `terminate_group` now detects the empty subtree and reports "already gone". `collect_subtree` no longer counts a PID that has no `/proc` entry.
 - **Fix: no spurious "FAILED" from PID reuse.** After the final `SIGKILL`, the survivor check now re-anchors on the root's start time first — a PID recycled by an unrelated process during the settle window is no longer mistaken for a surviving process tree and reported FAILED (exit 2).
