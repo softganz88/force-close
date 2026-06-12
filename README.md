@@ -17,7 +17,7 @@ Linux + X11 (or XWayland). Depends on: `wmctrl`, `ps`, `lsof`, `pgrep`, `tput`, 
 
 **TUI keys:** `<id>` terminate · `a <id>` analyze · `r` refresh · `q` quit.
 
-**Kill chain** (graceful → forced): X11 window close → group `SIGTERM` → group `SIGKILL`, each with a timeout and a re-validation of process identity before escalating.
+**Kill chain** (graceful → forced): X11 window close → subtree `SIGTERM` → subtree `SIGKILL`, each with a timeout and a re-validation of process identity before escalating. It signals the target's process **subtree** (the PID and its descendants), never its process group — on a desktop session GUI apps share the session leader's process group, so a group kill would take down the whole session.
 
 ## CLI exit codes
 
@@ -31,9 +31,11 @@ Linux + X11 (or XWayland). Depends on: `wmctrl`, `ps`, `lsof`, `pgrep`, `tput`, 
 
 - Never lists or signals its own process tree (PID / ancestors / process group / session) — survives renaming the script.
 - Anchors each target to its `/proc/<pid>/stat` start time, captured at listing time, to defeat PID reuse before sending any signal.
-- Refuses to signal its own process group.
+- Signals only the target's process subtree, never its process group, so killing a desktop app can't take down the shared session group.
+- Refuses to terminate a session leader (a process whose PID equals its session id) — doing so would close every app in the session.
 - Treats zombies as un-killable and reports that their parent must reap them, rather than looping on a kill that can never succeed.
 - Sanitizes attacker-influenced window titles before printing.
+- **tmux/screen caveat:** the self-tree exclusion is based on process session and ancestry. Run inside a multiplexer, the script lives in the tmux/screen server's session — so the terminal hosting your client is *not* excluded and appears in the list like any other window. Run the script directly in the terminal you want protected.
 
 ## Tests
 
@@ -46,6 +48,14 @@ bats tests/
 The suite spawns only its own short-lived `sleep` processes — the kill chain itself is never exercised automatically.
 
 ## Changelog
+
+### Unreleased
+
+- **Fix (critical): no longer kills the whole desktop session.** The kill chain signalled the target's entire *process group* (`kill -- -PGID`). On Cinnamon/GNOME every GUI app shares the session leader's process group (e.g. `cinnamon-session`), so terminating any listed app SIGTERM'd all ~45 session processes and logged the user out. The chain now signals the process **subtree** (the PID and its descendant helpers/renderers) instead — a Chrome window kills Chrome and its renderers, not the session. A second guard refuses outright to terminate a session leader (`pid == sid`). The confirm prompt now names the app and its process-tree size rather than a process-group id.
+- **PID-less windows are now listed** — windows whose app sets no `_NET_WM_PID` (old Xt toolkits such as `xmessage`, some Wine windows) were silently invisible. They now appear as muted close-only rows (`?` in the PID column, `no PID hint` in WCHAN) and can be closed via a WM close request by window id; analysis and signal escalation stay unavailable (there is no PID to act on), and the TUI says so.
+- **Kill-chain results stay visible** — success and abort messages (`OK`, `Process group exited`, identity-changed aborts) paused for a beat before the table redraws; previously they flashed by unreadably on the graceful paths.
+- **Analyze screen no longer wraps** — long `lsof` lines truncate to the terminal width.
+- **Docs: tmux/screen caveat** — running inside a multiplexer puts the script in the server's session, so the self-tree exclusion no longer covers the terminal hosting your client (see Safety).
 
 ### v5.0.2
 

@@ -175,38 +175,66 @@ get_wchan() {
     fi
 }
 
-# Any non-zombie member left in the group? (Zombies can't be signaled away —
+# Collect a PID and all its descendants (children, grandchildren, …) into the
+# SUBTREE array, breadth-first via /proc. We kill the subtree — NOT the process
+# group — because on a desktop session every GUI app shares the session leader's
+# process group (e.g. cinnamon-session); `kill -- -PGID` would take down the
+# whole session. A process's descendants are its actual helpers/renderers.
+# Re-snapshotted each stage so freshly-spawned children are caught.
+collect_subtree() { # $1=root pid → fills global array SUBTREE
+    SUBTREE=()
+    local -a queue=("$1")
+    local cur kid
+    while (( ${#queue[@]} > 0 )); do
+        cur="${queue[0]}"; queue=("${queue[@]:1}")
+        # Never include our own tree (the terminal/script): a descendant scan
+        # can't reach us, but a recycled PID could — cheap guard, hard safety.
+        is_self_tree "$cur" && continue
+        SUBTREE+=("$cur")
+        for kid in $(pgrep -P "$cur" 2>/dev/null || true); do
+            queue+=("$kid")
+        done
+    done
+}
+
+# Any non-zombie process left in the subtree? (Zombies can't be signaled away —
 # counting them as alive would report FAILED forever on unreaped children.)
-group_alive() {
+subtree_alive() { # $1=root pid
+    collect_subtree "$1"
     local p st
-    for p in $(pgrep -g "$1" 2>/dev/null || true); do
+    for p in "${SUBTREE[@]}"; do
         st=$(ps -o state= -p "$p" 2>/dev/null) || continue
         [[ "$st" == Z* ]] || return 0
     done
     return 1
 }
 
-wait_group_exit() { # pgid seconds → 0 once the group has no live members
+wait_subtree_exit() { # root seconds → 0 once the subtree has no live members
     local i
     for (( i=$2; i>0; i-- )); do
-        group_alive "$1" || return 0
+        subtree_alive "$1" || return 0
         echo -n "·"; sleep 1
     done
     return 1
 }
 
-# Gate between kill stages: 0=proceed 1=group-gone(success) 2=identity-changed(abort).
-# A dead leader with live members still proceeds — the kernel reserves a PID
-# while it serves as a PGID, so the group identity can't be recycled under us.
-kill_gate() { # pid anchor_start pgid
-    local pid="$1" anchor="$2" pgid="$3" cur
-    group_alive "$pgid" || return 1
+# Send a signal to every member of the subtree (leaves first via reverse order,
+# so parents can't re-fork children we already signalled). Skips our own tree.
+signal_subtree() { # $1=signal $2=root pid
+    collect_subtree "$2"
+    local i
+    for (( i=${#SUBTREE[@]}-1; i>=0; i-- )); do
+        kill "-$1" "${SUBTREE[i]}" 2>/dev/null || true
+    done
+}
+
+# Gate between kill stages: 0=proceed 1=subtree-gone(success) 2=identity-changed(abort).
+kill_gate() { # pid anchor_start
+    local pid="$1" anchor="$2"
+    subtree_alive "$pid" || return 1
     get_starttime "$pid"
-    if [[ -n "$STARTTIME" ]]; then
-        [[ "$STARTTIME" != "$anchor" ]] && return 2
-        cur=$(ps -o pgid= -p "$pid" 2>/dev/null | xargs) || cur=""
-        [[ -n "$cur" && "$cur" != "$pgid" ]] && return 2
-    fi
+    # Root still alive but identity changed → PID was reused; abort.
+    [[ -n "$STARTTIME" && "$STARTTIME" != "$anchor" ]] && return 2
     return 0
 }
 
@@ -320,11 +348,13 @@ deep_analyze() {
     echo -e " ${SEP}${rule}${NC}"
     # Capture first: lsof | head under pipefail SIGPIPEs lsof on big output
     # and the old fallback fired after a fully successful listing.
-    local lsof_out
+    local lsof_out cols
+    cols=$(tput cols 2>/dev/null) || cols=80
+    if ! [[ "$cols" =~ ^[0-9]+$ && "$cols" -ge 20 ]]; then cols=80; fi
     lsof_out=$(lsof -n -p "$pid" 2>/dev/null || true)
     if [[ -n "$lsof_out" ]]; then
         head -n 12 <<< "$lsof_out" | while IFS= read -r line; do
-            echo "  $line"
+            echo "  ${line:0:cols-3}"   # truncate to terminal width, don't wrap
         done
     else
         echo "  No open-file data (process gone, or permission denied — try sudo)."
@@ -342,17 +372,28 @@ terminate_group() {
     local name="$2"
     local anchor_start="${3:-}"   # starttime captured at listing time
 
-    # Re-check PGID right before killing to avoid race conditions
-    local pgid
+    # Re-check identity right before killing to avoid race conditions
+    local pgid sid
     pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | xargs) || true
     if [[ -z "$pgid" ]]; then
         echo -e " ${RED}Process $pid is already gone.${NC}"
         sleep 1 ; return 0
     fi
+    sid=$(ps -o sid= -p "$pid" 2>/dev/null | xargs) || sid=""
 
-    # Never signal our own process group (self-kill guard)
-    if [[ "$pgid" == "$SELF_PGID" ]]; then
-        echo -e " ${RED}Refusing: PGID $pgid is this tool's own process group.${NC}"
+    # Never signal our own tree (self-kill guard)
+    if is_self_tree "$pid" "$pgid" "$sid"; then
+        echo -e " ${RED}Refusing: PID $pid is part of this tool's own process tree.${NC}"
+        sleep 1 ; return 0
+    fi
+
+    # Session-group guard: when a process group leader is also a session leader
+    # (pgid == sid), the group spans the entire desktop session — on Cinnamon/
+    # GNOME every GUI app shares cinnamon-session's group. We never group-kill
+    # anyway (we kill the subtree), but refuse outright if the *target itself*
+    # is the session leader: terminating it tears down the whole session.
+    if [[ -n "$sid" && "$pid" == "$sid" ]]; then
+        echo -e " ${RED}Refusing: PID $pid is a session leader — terminating it would close every app in the session.${NC}"
         sleep 1 ; return 0
     fi
 
@@ -379,13 +420,17 @@ terminate_group() {
         sleep 1 ; return 0
     fi
 
-    printf '\n %sCONFIRM%s Terminate group %s%s%s (%s)? [y/N]: ' \
-           "${RED}${BOLD}" "$NC" "$BOLD" "$pgid" "$NC" "$name"
+    # Show how many processes the subtree covers so the user knows the blast
+    # radius before confirming (1 = just this process; >1 = it has children).
+    collect_subtree "$pid"
+    local nproc=${#SUBTREE[@]}
+    printf '\n %sCONFIRM%s Terminate %s%s%s (PID %s, %s process%s)? [y/N]: ' \
+           "${RED}${BOLD}" "$NC" "$BOLD" "$name" "$NC" "$pid" "$nproc" "$([[ $nproc -ne 1 ]] && echo es)"
     local CONFIRM
     read -r CONFIRM || CONFIRM=""    # EOF = decline, never set -e death
     if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then return 0; fi
 
-    echo -e "\n ${BOLD}Kill Chain ${GRAY}PGID: $pgid${NC}"
+    echo -e "\n ${BOLD}Kill Chain ${GRAY}PID: $pid ($nproc process tree)${NC}"
 
     # STAGE 1: X11 close — every window belonging to this PID, looked up fresh
     local wids w
@@ -395,48 +440,79 @@ terminate_group() {
         for w in "${wids[@]}"; do
             wmctrl -ic "$w" 2>/dev/null || true
         done
-        if wait_group_exit "$pgid" "$STAGE_TIMEOUT"; then
-            echo -e "${GREEN}${BOLD} OK${NC}"; return 0
+        if wait_subtree_exit "$pid" "$STAGE_TIMEOUT"; then
+            echo -e "${GREEN}${BOLD} OK${NC}"; sleep 1; return 0
         fi
         echo -e " ${YELLOW}timeout${NC}"
     fi
 
     # Re-validate identity before escalating
     local gate=0
-    kill_gate "$pid" "$anchor_start" "$pgid" || gate=$?
+    kill_gate "$pid" "$anchor_start" || gate=$?
     if (( gate == 1 )); then
-        echo -e "  ${GREEN}${BOLD}Process group exited${NC}"; return 0
+        echo -e "  ${GREEN}${BOLD}Process tree exited${NC}"; sleep 1; return 0
     elif (( gate == 2 )); then
-        echo -e "  ${YELLOW}Process identity changed under us — aborting${NC}"; return 0
+        echo -e "  ${YELLOW}Process identity changed under us — aborting${NC}"; sleep 1; return 0
     fi
 
-    # STAGE 2: Group SIGTERM
+    # STAGE 2: subtree SIGTERM
     echo -ne "  ${GRAY}2/3${NC} SIGTERM (graceful)   "
-    kill -15 -- -"$pgid" 2>/dev/null || true
-    if wait_group_exit "$pgid" "$STAGE_TIMEOUT"; then
-        echo -e "${GREEN}${BOLD} OK${NC}"; return 0
+    signal_subtree 15 "$pid"
+    if wait_subtree_exit "$pid" "$STAGE_TIMEOUT"; then
+        echo -e "${GREEN}${BOLD} OK${NC}"; sleep 1; return 0
     fi
     echo -e " ${YELLOW}timeout${NC}"
 
     # Re-validate before SIGKILL
     gate=0
-    kill_gate "$pid" "$anchor_start" "$pgid" || gate=$?
+    kill_gate "$pid" "$anchor_start" || gate=$?
     if (( gate == 1 )); then
-        echo -e "  ${GREEN}${BOLD}Process group exited${NC}"; return 0
+        echo -e "  ${GREEN}${BOLD}Process tree exited${NC}"; sleep 1; return 0
     elif (( gate == 2 )); then
-        echo -e "  ${YELLOW}Process identity changed under us — aborting${NC}"; return 0
+        echo -e "  ${YELLOW}Process identity changed under us — aborting${NC}"; sleep 1; return 0
     fi
 
-    # STAGE 3: Group SIGKILL
+    # STAGE 3: subtree SIGKILL
     echo -ne "  ${GRAY}3/3${NC} SIGKILL (forced)     "
-    kill -9 -- -"$pgid" 2>/dev/null || true
+    signal_subtree 9 "$pid"
     sleep 1
-    if ! group_alive "$pgid"; then
+    if ! subtree_alive "$pid"; then
         echo -e "${GREEN}${BOLD} TERMINATED${NC}"
     else
-        echo -e "${RED}${BOLD} FAILED${NC} ${GRAY}(survivors in group — try with sudo)${NC}"
+        echo -e "${RED}${BOLD} FAILED${NC} ${GRAY}(survivors in tree — try with sudo)${NC}"
         KILL_FAILED=1
     fi
+    echo -ne "\n Press ${BOLD}Enter${NC} to continue... " ; read -r || true
+    return 0
+}
+
+# X11-close-only path for windows whose app sets no _NET_WM_PID (wmctrl PID
+# column 0 — old Xt toolkits, some Wine windows). Without a PID there is
+# nothing to signal, but the WM can still deliver a close request by window
+# id; no escalation past the request is possible.
+close_window() { # $1=window id (0x...) $2=name
+    local wid="$1" name="$2" i
+
+    if ! wmctrl -l 2>/dev/null | grep -q "^$wid "; then
+        echo -e " ${RED}Window is already gone.${NC}"
+        sleep 1 ; return 0
+    fi
+
+    printf '\n %sCONFIRM%s Close window %s%s%s (%s)? No PID — close request only. [y/N]: ' \
+           "${RED}${BOLD}" "$NC" "$BOLD" "$wid" "$NC" "$name"
+    local CONFIRM
+    read -r CONFIRM || CONFIRM=""    # EOF = decline, never set -e death
+    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then return 0; fi
+
+    echo -ne "\n  Window close request "
+    wmctrl -ic "$wid" 2>/dev/null || true
+    for (( i=STAGE_TIMEOUT; i>0; i-- )); do
+        if ! wmctrl -l 2>/dev/null | grep -q "^$wid "; then
+            echo -e "${GREEN}${BOLD} OK${NC}"; sleep 1; return 0
+        fi
+        echo -n "·"; sleep 1
+    done
+    echo -e " ${YELLOW}window ignored the close request — no PID to escalate with${NC}"
     echo -ne "\n Press ${BOLD}Enter${NC} to continue... " ; read -r || true
     return 0
 }
@@ -479,7 +555,7 @@ if [[ -n "${1:-}" ]]; then
     exit 0
 fi
 
-declare -A MAP_PID MAP_NAME MAP_START
+declare -A MAP_PID MAP_NAME MAP_START MAP_WID
 declare -A PS_CPU PS_MEM PS_STATE PS_PGID PS_SID
 
 enter_tui   # alt-screen for the interactive loop only (CLI mode stays linear)
@@ -491,7 +567,7 @@ while true; do
     WINDOW_DATA=$(wmctrl -lp 2>/dev/null | sort -k3 -n || true)
 
     COUNT=1
-    MAP_PID=(); MAP_NAME=(); MAP_START=()
+    MAP_PID=(); MAP_NAME=(); MAP_START=(); MAP_WID=()
     PS_CPU=(); PS_MEM=(); PS_STATE=(); PS_PGID=(); PS_SID=()
 
     # Pass 1: collect PIDs, then fetch stats for all of them with ONE ps call
@@ -513,36 +589,48 @@ while true; do
 
     # Pass 2: render rows
     while read -r _WID _DESKTOP PID _HOST TITLE; do
-        [[ -z "${PID:-}" || "$PID" == "0" ]] && continue
-        [[ -n "${PS_STATE[$PID]+x}" ]] || continue
-
-        # Never list our own tree (incl. the terminal hosting this script —
-        # killing it takes the script down mid-chain)
-        is_self_tree "$PID" "${PS_PGID[$PID]}" "${PS_SID[$PID]}" && continue
+        [[ -z "${PID:-}" ]] && continue
 
         # Strip control bytes — titles are attacker-influenced (web page titles)
         TITLE="${TITLE//[![:print:]]/}"
 
-        CPU="${PS_CPU[$PID]}" ; MEM="${PS_MEM[$PID]}" ; STATE="${PS_STATE[$PID]}"
-        get_wchan "$PID"
-        cpu10=0 ; mem10=0    # assigned indirectly via printf -v in to10
-        to10 cpu10 "$CPU" ; to10 mem10 "$MEM"
+        if [[ "$PID" == "0" ]]; then
+            # App sets no _NET_WM_PID (old Xt toolkits, some Wine windows):
+            # PID unknown → signals impossible, but an X11 close request only
+            # needs the window id. List as a close-only row instead of hiding it.
+            PID_CELL="?" ; CPU="-" ; MEM="-" ; STATE="?" ; WCHAN_RES="no PID hint"
+            COLOR="${MUTED}"
+            MAP_PID[$COUNT]="" ; MAP_WID[$COUNT]=$_WID ; MAP_START[$COUNT]=""
+        else
+            [[ -n "${PS_STATE[$PID]+x}" ]] || continue
 
-        # Color priority: active < background < high usage < frozen/stopped/zombie
-        COLOR="${GREEN}"
-        if [[ "$STATE" == S* ]] && (( cpu10 <= CPU_IDLE10 )); then COLOR="${MUTED}"; fi
-        if (( cpu10 > CPU_WARN10 || mem10 > MEM_WARN10 )); then COLOR="${YELLOW}${BOLD}"; fi
-        if [[ "$STATE" == [DZTt]* ]]; then COLOR="${RED}${BOLD}"; fi
+            # Never list our own tree (incl. the terminal hosting this script —
+            # killing it takes the script down mid-chain)
+            is_self_tree "$PID" "${PS_PGID[$PID]}" "${PS_SID[$PID]}" && continue
+
+            PID_CELL="$PID"
+            CPU="${PS_CPU[$PID]}" ; MEM="${PS_MEM[$PID]}" ; STATE="${PS_STATE[$PID]}"
+            get_wchan "$PID"
+            cpu10=0 ; mem10=0    # assigned indirectly via printf -v in to10
+            to10 cpu10 "$CPU" ; to10 mem10 "$MEM"
+
+            # Color priority: active < background < high usage < frozen/stopped/zombie
+            COLOR="${GREEN}"
+            if [[ "$STATE" == S* ]] && (( cpu10 <= CPU_IDLE10 )); then COLOR="${MUTED}"; fi
+            if (( cpu10 > CPU_WARN10 || mem10 > MEM_WARN10 )); then COLOR="${YELLOW}${BOLD}"; fi
+            if [[ "$STATE" == [DZTt]* ]]; then COLOR="${RED}${BOLD}"; fi
+
+            MAP_PID[$COUNT]=$PID
+            get_starttime "$PID"
+            MAP_START[$COUNT]="$STARTTIME"
+        fi
 
         trunc_str TITLE_CELL "$TITLE" "$TITLE_W"
         # Widths mirror COL_W (see table geometry above)
         printf " ${COLOR} %3s ${NC}${SEP}${V}${NC}${COLOR} %-6s ${NC}${SEP}${V}${NC}${COLOR} %4s ${NC}${SEP}${V}${NC}${COLOR} %4s ${NC}${SEP}${V}${NC}${COLOR} %-2s ${NC}${SEP}${V}${NC}${COLOR} %-12s ${NC}${SEP}${V}${NC}${COLOR} %s${NC}\n" \
-               "$COUNT" "$PID" "$CPU" "$MEM" "$STATE" "$WCHAN_RES" "$TITLE_CELL"
+               "$COUNT" "$PID_CELL" "$CPU" "$MEM" "$STATE" "$WCHAN_RES" "$TITLE_CELL"
 
-        MAP_PID[$COUNT]=$PID
         MAP_NAME[$COUNT]="$TITLE"
-        get_starttime "$PID"
-        MAP_START[$COUNT]="$STARTTIME"
         COUNT=$((COUNT + 1))
     done <<< "$WINDOW_DATA"
 
@@ -560,7 +648,11 @@ while true; do
             if [[ "$ID" =~ ^[0-9]+$ ]]; then
                 ID=$(( 10#$ID ))             # normalize leading zeros to match keys
                 if [[ -n "${MAP_PID[$ID]+x}" ]]; then
-                    deep_analyze "${MAP_PID[$ID]}" "${MAP_NAME[$ID]}"
+                    if [[ -n "${MAP_PID[$ID]}" ]]; then
+                        deep_analyze "${MAP_PID[$ID]}" "${MAP_NAME[$ID]}"
+                    else
+                        echo "No PID for this window (its app sets no _NET_WM_PID) — analysis unavailable." ; sleep 2
+                    fi
                 else
                     echo "Invalid ID: $ID" ; sleep 1
                 fi
@@ -572,7 +664,11 @@ while true; do
             if [[ "$CHOICE" =~ ^[0-9]+$ ]]; then
                 ID=$(( 10#$CHOICE ))         # normalize leading zeros to match keys
                 if [[ -n "${MAP_PID[$ID]+x}" ]]; then
-                    terminate_group "${MAP_PID[$ID]}" "${MAP_NAME[$ID]}" "${MAP_START[$ID]}"
+                    if [[ -n "${MAP_PID[$ID]}" ]]; then
+                        terminate_group "${MAP_PID[$ID]}" "${MAP_NAME[$ID]}" "${MAP_START[$ID]}"
+                    else
+                        close_window "${MAP_WID[$ID]}" "${MAP_NAME[$ID]}"
+                    fi
                 else
                     echo "Invalid ID: $ID" ; sleep 1
                 fi

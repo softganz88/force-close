@@ -15,7 +15,13 @@ setup() {
 }
 
 teardown() {
-    [[ -n "${TEST_PID:-}" ]] && kill "$TEST_PID" 2>/dev/null || true
+    # Kill the spawned process and any descendants it left (setsid trees don't
+    # die with the parent). Best-effort; never fail teardown.
+    if [[ -n "${TEST_PID:-}" ]]; then
+        local p
+        for p in $(pgrep -P "$TEST_PID" 2>/dev/null); do kill "$p" 2>/dev/null || true; done
+        kill "$TEST_PID" 2>/dev/null || true
+    fi
 }
 
 # Run a snippet in a shell with force-close.sh sourced.
@@ -176,6 +182,59 @@ assert_anchor_stable_across_comm_rename() { # $1=comm writer command
     run bash -c "source '$SCRIPT'; printf marker"
     [ "$status" -eq 0 ]
     [ "$output" = "marker" ]
+}
+
+# ── collect_subtree ───────────────────────────────────────────────────────
+# The fix for the session-logout bug: we kill the process SUBTREE, never the
+# process group (a desktop app shares the session leader's group). These tests
+# spawn a parent→child sleep tree and assert collection — no signals are sent.
+
+# setsid puts the test tree in its OWN session, so is_self_tree (which excludes
+# anything sharing the sourcing shell's session) doesn't filter it out — this
+# mirrors reality, where the target app is in a different session from the tool.
+@test "collect_subtree: gathers the root and its descendants" {
+    # Parent bash spawns a child sleep; the trailing ':' stops bash exec-ing
+    # the sleep (which would leave a single process, not a tree).
+    setsid bash -c 'sleep 30 & sleep 30; :' & TEST_PID=$!
+    # Wait for the child to appear under the parent.
+    local child=""
+    for _ in $(seq 1 40); do
+        child=$(pgrep -P "$TEST_PID" | head -1)
+        [ -n "$child" ] && break
+        sleep 0.1
+    done
+    [ -n "$child" ] || skip "child never spawned"
+    run fc "collect_subtree $TEST_PID; printf '%s\n' \"\${SUBTREE[@]}\""
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$TEST_PID"* ]]   # root included
+    [[ "$output" == *"$child"* ]]      # descendant included
+}
+
+@test "collect_subtree: single process yields exactly itself" {
+    setsid sleep 30 & TEST_PID=$!
+    # setsid may exec sleep directly (TEST_PID becomes the sleep) or fork; wait
+    # until the PID resolves to a real process, then collect.
+    for _ in $(seq 1 40); do [ -d "/proc/$TEST_PID" ] && break; sleep 0.1; done
+    run fc "collect_subtree $TEST_PID; printf '%s' \"\${#SUBTREE[@]}\""
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
+}
+
+@test "collect_subtree: excludes our own process tree" {
+    # The sourcing shell itself must never appear in a subtree rooted at it.
+    run fc 'collect_subtree $$; printf "%s" "${#SUBTREE[@]}"'
+    [ "$status" -eq 0 ]
+    [ "$output" = "0" ]
+}
+
+# ── close_window ──────────────────────────────────────────────────────────
+
+@test "close_window: nonexistent window id reports gone, no set -e death" {
+    # 0xfffffff0 is not a real X window id; needs a reachable X display.
+    run fc 'close_window 0xfffffff0 "test"; echo "rc=$?"'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"already gone"* ]]
+    [[ "$output" == *"rc=0"* ]]
 }
 
 # ── is_self_tree ──────────────────────────────────────────────────────────
