@@ -87,6 +87,13 @@ The suite spawns only its own short-lived `sleep` processes — the kill chain i
 
 - Initial reviewed release: identity-anchored kill chain (defeats PID reuse), group-aware liveness, self-tree exclusion, zombie handling, sanitized rendering, single-source table geometry, and a fork-free batched refresh. `shellcheck`-clean.
 
+## Security
+
+Found a vulnerability? Please report it privately — see
+[SECURITY.md](.github/SECURITY.md). The tool runs locally as the invoking user;
+the security-relevant bugs are ones that steer it into signaling the wrong
+process or running untrusted input as code.
+
 ## Contributing
 
 Contributions are welcome — see [CONTRIBUTING.md](.github/CONTRIBUTING.md). In
