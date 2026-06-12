@@ -1,5 +1,9 @@
 # force-close
 
+[![Stars](https://img.shields.io/github/stars/softganz88/force-close?style=flat&logo=github)](https://github.com/softganz88/force-close/stargazers)
+[![Release](https://img.shields.io/github/v/release/softganz88/force-close?display_name=tag&logo=github)](https://github.com/softganz88/force-close/releases/latest)
+![Platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20X11-informational)
+
 Advanced X11 process recovery and deep-analysis tool — an interactive TUI for inspecting and force-terminating stuck windows/processes, plus a non-interactive CLI mode for killing by name pattern.
 
 ![force-close TUI demo](docs/tui-demo.gif)
